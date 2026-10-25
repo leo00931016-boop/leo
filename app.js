@@ -33,24 +33,50 @@ function demoTick(){const i=session.demoIndex++,angle=i*.12;session.seconds+=5;r
 function pause(reason){if(!session||session.state!=='running')return;session.seconds=seconds();session.runStart=0;session.state='paused';stopWatch();last=null;$('badge').textContent='● 已暫停';if(reason)message(reason);}
 $('pause').onclick=()=>{if(session.state==='running')pause();else {message('等待新的有效定位後繼續…');run();}};
 function persist(){try{localStorage.setItem(KEY,JSON.stringify(records));storageOK=true;}catch{storageOK=false;message('裝置儲存空間不足或儲存被封鎖。紀錄暫留本頁，請先匯出或清理儲存空間。');}}
-$('finish').onclick=()=>{if(!session||session.state==='finished')return;session.seconds=seconds();session.runStart=0;session.state='finished';stopWatch();session.kcal=MoveCore.calories(session.met||3.5, Number($('weight')?.value||session.weight||60), session.seconds);const clean={...session,points:session.points||[],seconds:session.seconds,meters:session.meters||0,kcal:session.kcal||0,date:new Date().toISOString()};records.push(clean);persist();renderHistory();render();message('已完成本次運動，已儲存紀錄。');};
-function download(name,body,type){const url=URL.createObjectURL(new Blob([body],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-function cell(v){let s=String(v??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';}
 function safeNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 }
+function computeTrackMetrics(points, seconds, meters) {
+  let totalMeters = 0;
+  let fastestAdjacentSpeedMps = 0;
+  let segmentCount = 0;
+  if (Array.isArray(points) && points.length > 1) {
+    for (let i = 1; i < points.length; i += 1) {
+      const prev = points[i - 1];
+      const curr = points[i];
+      if (!prev || !curr) continue;
+      const dist = MoveCore.distance(prev, curr);
+      const dtSec = safeNumber(curr.t, 0) > 0 && safeNumber(prev.t, 0) > 0 ? (curr.t - prev.t) / 1000 : 0;
+      if (dist > 0 && dtSec > 0) {
+        totalMeters += dist;
+        const speedMps = dist / dtSec;
+        if (speedMps > fastestAdjacentSpeedMps) fastestAdjacentSpeedMps = speedMps;
+        segmentCount += 1;
+      }
+    }
+  }
+  const start = Array.isArray(points) && points.length ? points[0] : null;
+  const end = Array.isArray(points) && points.length ? points[points.length - 1] : null;
+  const straightLineDistance = start && end ? MoveCore.distance(start, end) : 0;
+  const finalMeters = safeNumber(meters, 0) > 0 ? safeNumber(meters, 0) : totalMeters;
+  const avgSpeedKmH = safeNumber(seconds, 0) > 0 ? (finalMeters / 1000) / (safeNumber(seconds, 0) / 3600) : 0;
+  return {
+    meters: finalMeters,
+    segmentCount,
+    straightLineDistance,
+    avgSpeedKmH,
+    fastestAdjacentSpeedKmH: fastestAdjacentSpeedMps * 3.6,
+    validGpsPoints: Array.isArray(points) ? points.length : 0
+  };
+}
+function buildExportHeaders(){return ['時間 ISO','課堂代號','類型','活動','身高 cm','體重 kg','年齡','時間 sec','距離 m','平均速度 km/h','估算熱量 kcal','段數','起點到終點直線距離 m','最快相鄰點速度 km/h','有效 GPS 點'];}
 function buildExportRow(record) {
   const points = Array.isArray(record?.points) ? record.points : [];
   const seconds = safeNumber(record?.seconds, 0);
   const meters = safeNumber(record?.meters, 0);
-  const avgSpeedKmH = seconds > 0 ? (meters / 1000) / (seconds / 3600) : 0;
-  const hasKcal = safeNumber(record?.kcal, 0) > 0;
-  const estKcal = hasKcal ? safeNumber(record.kcal, 0) : (safeNumber(record?.estKJ, safeNumber(record?.energyKJ, 0)) / 4.184);
-  const segmentCount = Array.isArray(points) && points.length ? new Set(points.map(p => p.segment || 0)).size : 0;
-  const straightLineDistance = Array.isArray(points) && points.length > 1 ? MoveCore.distance(points[0], points[points.length - 1]) : 0;
-  const fastestAdjacentSpeedKmH = safeNumber(record?.fastestAdjacentSpeedKmH, 0);
-  const validGpsPoints = points.length;
+  const metric = computeTrackMetrics(points, seconds, meters);
+  const kcal = safeNumber(record?.kcal, 0) > 0 ? safeNumber(record.kcal, 0) : (safeNumber(record?.estKJ, 0) / 4.184);
   return [
     record?.date ? new Date(record.date).toISOString() : '',
     record?.alias || '',
@@ -60,17 +86,19 @@ function buildExportRow(record) {
     safeNumber(record?.weight, 0),
     safeNumber(record?.age, 0),
     seconds,
-    meters,
-    avgSpeedKmH,
-    estKcal,
-    segmentCount,
-    straightLineDistance,
-    fastestAdjacentSpeedKmH,
-    validGpsPoints
+    metric.meters,
+    metric.avgSpeedKmH,
+    kcal,
+    metric.segmentCount,
+    metric.straightLineDistance,
+    metric.fastestAdjacentSpeedKmH,
+    metric.validGpsPoints
   ];
 }
-function exportCSV(items){if(!items.length){message('目前沒有可匯出的紀錄。');return;}const rows=[['時間 ISO','課堂代號','類型','活動','身高 cm','體重 kg','年齡','時間 sec','距離 m','平均速度 km/h','估算熱量 kcal','段數','起點到終點直線距離 m','最快相鄰點速度 km/h','有效 GPS 點'],...items.map(buildExportRow)];const csv=rows.map(r=>r.map(cell).join(',')).join('\n');download('campus-move-export.csv',csv,'text/csv;charset=utf-8');message('已匯出 CSV：campus-move-export.csv');}
-function exportExcel(items){if(!items.length){message('目前沒有可匯出的紀錄。');return;}const rows=[['時間 ISO','課堂代號','類型','活動','身高 cm','體重 kg','年齡','時間 sec','距離 m','平均速度 km/h','估算熱量 kcal','段數','起點到終點直線距離 m','最快相鄰點速度 km/h','有效 GPS 點'],...items.map(buildExportRow)];if(typeof XLSX !== 'undefined' && XLSX.utils && XLSX.writeFile){const ws=XLSX.utils.aoa_to_sheet(rows);const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'運動紀錄');XLSX.writeFile(wb,'campus-move-export.xlsx');message('已匯出 Excel：campus-move-export.xlsx');return;}exportCSV(items);}
+function cell(v){let s=String(v??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';}
+function exportCSV(items){if(!items.length){message('目前沒有可匯出的紀錄。');return;}const rows=[buildExportHeaders(),...items.map(buildExportRow)];const csv=rows.map(r=>r.map(cell).join(',')).join('\n');download('campus-move-export.csv',csv,'text/csv;charset=utf-8');message('已匯出 CSV：campus-move-export.csv');}
+function exportExcel(items){if(!items.length){message('目前沒有可匯出的紀錄。');return;}const rows=[buildExportHeaders(),...items.map(buildExportRow)];if(typeof XLSX !== 'undefined' && XLSX.utils && XLSX.writeFile){const ws=XLSX.utils.aoa_to_sheet(rows);const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'運動紀錄');XLSX.writeFile(wb,'campus-move-export.xlsx');message('已匯出 Excel：campus-move-export.xlsx');return;}exportCSV(items);}
+$('finish').onclick=()=>{if(!session||session.state==='finished')return;session.seconds=seconds();session.runStart=0;session.state='finished';stopWatch();const trackStats = computeTrackMetrics(session.points || [], session.seconds, session.meters || 0);const weight = Number($('profile')?.weight?.value || session.weight || 60);session.kcal = MoveCore.calories(session.met||3.5, weight, session.seconds);const clean={...session,...trackStats,seconds:session.seconds,meters:trackStats.meters,kcal:session.kcal || 0,date:new Date().toISOString()};records.push(clean);persist();renderHistory();render();message('已完成本次運動，已儲存紀錄。');};
 let historyFilter='all';
 function routeThumbnail(r){const box=document.createElement('div');box.className='route-thumb';const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 100 56');svg.setAttribute('preserveAspectRatio','none');const poly=document.createElementNS(ns,'polyline');const pts=(r.points||[]).slice(0, 200);if(pts.length){const xs=pts.map(p=>p.lat),ys=pts.map(p=>p.lng);const minLat=Math.min(...xs),maxLat=Math.max(...xs),minLng=Math.min(...ys),maxLng=Math.max(...ys);const coords=pts.map(p=>{const x=((p.lat-minLat)/(maxLat-minLat||1))*100;const y=((p.lng-minLng)/(maxLng-minLng||1))*56;return `${x},${y}`;}).join(' ');poly.setAttribute('points',coords);poly.setAttribute('fill','none');poly.setAttribute('stroke','#d95432');poly.setAttribute('stroke-width','3');poly.setAttribute('stroke-linecap','round');svg.appendChild(poly);}box.appendChild(svg);return box;}
 function renderHistory(){const root=$('records');root.replaceChildren();const actual=records.filter(r=>!r.demo);$('historyTotal').textContent=actual.length?`${actual.length} 次運動 · ${(actual.reduce((sum,r)=>sum+(r.meters||0),0)/1000).toFixed(2)} km`: '0 次運動';for(const r of actual){const card=document.createElement('article');card.className='record-card';const meta=document.createElement('div');meta.className='record-meta';meta.innerHTML=`<span>${new Date(r.date||Date.now()).toLocaleDateString('zh-TW')}</span><span>${r.mode||'運動'}</span><span>${Math.round((r.meters||0))} m</span>`;card.appendChild(meta);card.appendChild(routeThumbnail(r));const footer=document.createElement('div');footer.className='record-footer';footer.innerHTML=`<strong>${((r.meters||0)/1000).toFixed(2)} km</strong><span>${fmt(r.seconds||0)}</span><span>${Math.round(r.kcal||0)} kcal</span>`;card.appendChild(footer);root.appendChild(card);}}
@@ -83,514 +111,3 @@ window.addEventListener('beforeunload',e=>{if(session&&session.state!=='finished
 setInterval(()=>{if(session?.state==='running'&&!session.demo&&Date.now()-lastSignal>30000)pause('超過 30 秒沒有 GPS 更新，已自動暫停。請檢查定位後按繼續。');render();},1000);
 renderHistory();render();if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 document.querySelectorAll('.sidenav a[href^="#"]').forEach(a=>a.addEventListener('click',()=>{document.querySelectorAll('.sidenav a').forEach(n=>n.classList.toggle('active',n===a));document.querySelectorAll('.sidenav a').forEach(n=>n.classList.remove('active'));a.classList.add('active');}));
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-n

@@ -50,3 +50,105 @@ setInterval(()=>{if(session?.state==='running'&&!session.demo&&Date.now()-lastSi
 renderHistory();render();if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 
 document.querySelectorAll('.sidenav a[href^="#"]').forEach(a=>a.addEventListener('click',()=>{document.querySelectorAll('.sidenav a').forEach(n=>n.classList.toggle('active',n===a));document.querySelector('.breadcrumb strong').textContent=a.textContent.trim();}));
+/**
+ * 計算兩點經緯度之球面距離 (公里)
+ */
+function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // 地球半徑 (km)
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * 計算平均速度 (km/h)
+ * @param {number} distanceKm - 距離 (公里)
+ * @param {number} durationHours - 時間 (小時)
+ * @returns {string} 保留兩位小數的速度字串
+ */
+function calculateAvgSpeed(distanceKm, durationHours) {
+  if (!durationHours || durationHours <= 0 || !distanceKm || distanceKm <= 0) {
+    return "0.00";
+  }
+  return (distanceKm / durationHours).toFixed(2);
+}
+
+/**
+ * 將速度 (km/h) 換算為跑者配速格式 (分'秒"/km)
+ */
+function speedToPace(speedKmh) {
+  const speed = parseFloat(speedKmh);
+  if (!speed || speed <= 0) return "--'--\"/km";
+  const paceMinutes = 60 / speed;
+  const m = Math.floor(paceMinutes);
+  const s = Math.round((paceMinutes - m) * 60);
+  return `${m}'${s.toString().padStart(2, '0')}"/km`;
+}
+function exportTrackWithAvgSpeed() {
+  const points = state.trackedRoute.length > 0 ? state.trackedRoute : state.drawnPoints.map((p, idx) => ({
+    lat: p[0],
+    lon: p[1],
+    timestamp: new Date(Date.now() + idx * 60000).toISOString()
+  }));
+
+  if (points.length < 2) {
+    alert("至少需要 2 個點位才能計算平均速度！");
+    return;
+  }
+
+  const startPt = points[0];
+  const endPt = points[points.length - 1];
+
+  // 全程總時間 (小時)
+  const totalHours = (new Date(endPt.timestamp) - new Date(startPt.timestamp)) / (1000 * 60 * 60);
+
+  // 計算全程總距離
+  let totalDistanceKm = 0;
+  for (let i = 1; i < points.length; i++) {
+    totalDistanceKm += getDistanceFromLatLonInKm(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
+  }
+
+  // 全程平均速度
+  const overallAvgSpeed = calculateAvgSpeed(totalDistanceKm, totalHours);
+  const overallPace = speedToPace(overallAvgSpeed);
+
+  const headers = [
+    "序號",
+    "時間 (Timestamp)",
+    "緯度 (Latitude)",
+    "經度 (Longitude)",
+    "累計距離 (km)",
+    "此時累計平均速度 (km/h)",
+    "全程總平均速度 (km/h)",
+    "全程總配速"
+  ];
+
+  let accumulatedDist = 0;
+  const rows = points.map((p, idx) => {
+    if (idx > 0) {
+      accumulatedDist += getDistanceFromLatLonInKm(points[idx - 1].lat, points[idx - 1].lon, p.lat, p.lon);
+    }
+    const currentHours = (new Date(p.timestamp) - new Date(startPt.timestamp)) / (1000 * 60 * 60);
+    const rollingAvgSpeed = calculateAvgSpeed(accumulatedDist, currentHours);
+
+    return [
+      idx + 1,
+      `"${p.timestamp}"`,
+      p.lat,
+      p.lon,
+      accumulatedDist.toFixed(2),
+      rollingAvgSpeed,
+      overallAvgSpeed,
+      `"${overallPace}"`
+    ].join(",");
+  });
+
+  // 加 \uFEFF 防止 Excel 開啟中文亂碼
+  const csvContent = "\uFEFF" + [headers.join(","), ...rows].join("\r\n");
+  downloadFile(csvContent, "運動軌跡_平均速度分析.csv", "text/csv;charset=utf-8;");
+}

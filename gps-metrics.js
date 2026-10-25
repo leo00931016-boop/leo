@@ -10,70 +10,156 @@
     return deg * Math.PI / 180;
   }
 
-  function haversineMeters(a, b) {
-    if (!a || !b) return 0;
-    const dLat = toRad(b.lat - a.lat);
-    const dLng = toRad(b.lng - a.lng);
-    const lat1 = toRad(a.lat);
-    const lat2 = toRad(b.lat);
-    const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-    return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
+  function toTimestampMs(value, fallback = Date.now()) {
+    const n = safeNumber(value, fallback);
+    if (!Number.isFinite(n)) return fallback;
+    return n > 1e12 ? n : n * 1000;
   }
 
-  function aggregateRecord(record) {
-    if (!record || !Array.isArray(record.points) || !record.points.length) {
+  class TrackMetricsCalculator {
+    static normalizePoint(point, fallbackTimestamp = Date.now()) {
+      if (!point) return null;
+
+      const latitude = safeNumber(point.latitude, safeNumber(point.lat, Number.NaN));
+      const longitude = safeNumber(point.longitude, safeNumber(point.lng, Number.NaN));
+
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return null;
+      }
+
+      const timestamp = toTimestampMs(
+        safeNumber(point.timestamp, safeNumber(point.t, fallbackTimestamp)),
+        fallbackTimestamp
+      );
+      const altitude = safeNumber(point.altitude, safeNumber(point.alt, 0));
+      const hdop = safeNumber(point.hdop, safeNumber(point.accuracy, 0));
+
       return {
-        ...record,
-        meters: 0,
-        segmentCount: 0,
-        straightLineDistance: 0,
-        avgSpeedMps: 0,
-        avgSpeedKmH: 0,
-        fastestAdjacentSpeedMps: 0,
-        fastestAdjacentSpeedKmH: 0,
-        validGpsPoints: 0,
-        estKJ: safeNumber(record && record.kcal, 0)
+        latitude,
+        longitude,
+        altitude,
+        timestamp,
+        hdop,
+        lat: latitude,
+        lng: longitude,
+        t: timestamp,
+        accuracy: hdop,
+        alt: altitude
       };
     }
 
-    const points = record.points;
-    let totalMeters = 0;
-    let maxAdjacentSpeed = 0;
-    let segmentCount = 0;
+    static haversineMeters(a, b) {
+      const pa = this.normalizePoint(a);
+      const pb = this.normalizePoint(b);
+      if (!pa || !pb) return 0;
 
-    for (let i = 1; i < points.length; i += 1) {
-      const prev = points[i - 1];
-      const curr = points[i];
-      const dist = haversineMeters(prev, curr);
-      const dtSec = safeNumber(curr && curr.t && prev && prev.t ? (curr.t - prev.t) / 1000 : 0, 0);
-
-      if (dist > 0 && dtSec > 0) {
-        const speed = dist / dtSec;
-        totalMeters += dist;
-        segmentCount += 1;
-        if (speed > maxAdjacentSpeed) maxAdjacentSpeed = speed;
-      }
+      const dLat = toRad(pb.latitude - pa.latitude);
+      const dLng = toRad(pb.longitude - pa.longitude);
+      const lat1 = toRad(pa.latitude);
+      const lat2 = toRad(pb.latitude);
+      const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+      return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
     }
 
-    const elapsedSec = safeNumber(record.seconds, 0);
-    const avgMps = elapsedSec > 0 ? totalMeters / elapsedSec : 0;
-    const start = points[0];
-    const end = points[points.length - 1];
-    const straightLineDistance = start && end ? haversineMeters(start, end) : 0;
-    const estKJ = safeNumber(record.kcal, safeNumber(record.estKJ, safeNumber(record.energyKJ, 0)));
+    static calculate(points = [], metadata = {}) {
+      const normalized = [];
+      for (const point of points) {
+        const normalizedPoint = this.normalizePoint(point);
+        if (normalizedPoint) normalized.push(normalizedPoint);
+      }
 
-    return {
-      ...record,
-      meters: totalMeters,
-      segmentCount,
-      straightLineDistance,
-      avgSpeedMps: avgMps,
-      avgSpeedKmH: avgMps * 3.6,
-      fastestAdjacentSpeedMps: maxAdjacentSpeed,
-      fastestAdjacentSpeedKmH: maxAdjacentSpeed * 3.6,
-      validGpsPoints: points.length,
-      estKJ
-    };
+      if (!normalized.length) {
+        return {
+          meters: 0,
+          segmentCount: 0,
+          straightLineDistance: 0,
+          avgSpeedMps: 0,
+          avgSpeedKmH: 0,
+          fastestAdjacentSpeedMps: 0,
+          fastestAdjacentSpeedKmH: 0,
+          validGpsPoints: 0,
+          estKJ: safeNumber(metadata.kcal, safeNumber(metadata.estKJ, safeNumber(metadata.energyKJ, 0)))
+        };
+      }
+
+      let totalMeters = 0;
+      let maxAdjacentSpeed = 0;
+      let segmentCount = 0;
+
+      for (let i = 1; i < normalized.length; i += 1) {
+        const prev = normalized[i - 1];
+        const curr = normalized[i];
+        const dist = this.haversineMeters(prev, curr);
+        const dtMs = curr.timestamp - prev.timestamp;
+        const dtSec = dtMs > 0 ? dtMs / 1000 : 0;
+
+        if (dist > 0 && dtSec > 0) {
+          const speed = dist / dtSec;
+          totalMeters += dist;
+          segmentCount += 1;
+          if (speed > maxAdjacentSpeed) maxAdjacentSpeed = speed;
+        }
+      }
+
+      const start = normalized[0];
+      const end = normalized[normalized.length - 1];
+      const effectiveDurationSec = safeNumber(metadata.durationSeconds, 0) > 0
+        ? safeNumber(metadata.durationSeconds, 0)
+        : Math.max(0, (end.timestamp - start.timestamp) / 1000);
+      const avgMps = effectiveDurationSec > 0 ? totalMeters / effectiveDurationSec : 0;
+      const straightLineDistance = start && end ? this.haversineMeters(start, end) : 0;
+      const estKJ = safeNumber(metadata.kcal, safeNumber(metadata.estKJ, safeNumber(metadata.energyKJ, 0)));
+
+      return {
+        meters: totalMeters,
+        segmentCount,
+        straightLineDistance,
+        avgSpeedMps: avgMps,
+        avgSpeedKmH: avgMps * 3.6,
+        fastestAdjacentSpeedMps: maxAdjacentSpeed,
+        fastestAdjacentSpeedKmH: maxAdjacentSpeed * 3.6,
+        validGpsPoints: normalized.length,
+        estKJ
+      };
+    }
+
+    static fromRecord(record) {
+      if (!record || !Array.isArray(record.points)) {
+        return {
+          ...record,
+          meters: 0,
+          segmentCount: 0,
+          straightLineDistance: 0,
+          avgSpeedMps: 0,
+          avgSpeedKmH: 0,
+          fastestAdjacentSpeedMps: 0,
+          fastestAdjacentSpeedKmH: 0,
+          validGpsPoints: 0,
+          estKJ: safeNumber(record && record.kcal, 0)
+        };
+      }
+
+      const metrics = this.calculate(record.points, {
+        durationSeconds: safeNumber(record.seconds, 0),
+        kcal: safeNumber(record.kcal, safeNumber(record.estKJ, safeNumber(record.energyKJ, 0)))
+      });
+
+      return {
+        ...record,
+        ...metrics
+      };
+    }
+  }
+
+  window.TrackMetricsCalculator = TrackMetricsCalculator;
+  window.WorkoutRecord = class WorkoutRecord {
+    static fromSession(session) {
+      return TrackMetricsCalculator.fromRecord(session || {});
+    }
+  };
+
+  function aggregateRecord(record) {
+    return TrackMetricsCalculator.fromRecord(record);
   }
 
   function readRecords() {
@@ -190,3 +276,4 @@
     bootstrap();
   }
 })();
+

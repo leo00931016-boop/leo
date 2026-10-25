@@ -89,7 +89,25 @@ $('locate').onclick=()=>{
   }, locateError, {enableHighAccuracy:true, timeout:15000, maximumAge:0});
 };
 
-function normalize(pos){return {lat:pos.coords.latitude,lng:pos.coords.longitude,accuracy:pos.coords.accuracy,t:pos.timestamp};}
+function normalize(pos){
+  const lat = Number(pos?.coords?.latitude ?? pos?.latitude ?? pos?.lat ?? 0);
+  const lng = Number(pos?.coords?.longitude ?? pos?.longitude ?? pos?.lng ?? 0);
+  const accuracy = Number(pos?.coords?.accuracy ?? pos?.accuracy ?? pos?.hdop ?? 0);
+  const altitude = Number(pos?.coords?.altitude ?? pos?.altitude ?? pos?.alt ?? 0);
+  const ts = Number(pos?.timestamp ?? pos?.t ?? Date.now());
+  return {
+    latitude: lat,
+    longitude: lng,
+    altitude,
+    timestamp: ts,
+    hdop: accuracy,
+    lat,
+    lng,
+    accuracy,
+    t: ts,
+    alt: altitude
+  };
+}
 function seconds(){return session?session.seconds+(session.state==='running'&&session.runStart?(Date.now()-session.runStart)/1000:0):0;}
 function fmt(n){const s=Math.floor(n);return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;}
 
@@ -124,21 +142,39 @@ function render(){
 async function holdScreen(){try{if('wakeLock'in navigator)wake=await navigator.wakeLock.request('screen');}catch{}} 
 function stopWatch(){if(watch!==null){navigator.geolocation.clearWatch(watch);watch=null;}clearInterval(demoTimer);demoTimer=null;wake?.release().catch(()=>{});wake=null;}
 
+function toSessionPoint(point, segmentIndex = 0) {
+  const normalized = normalize(point || {});
+  return {
+    latitude: normalized.latitude,
+    longitude: normalized.longitude,
+    altitude: normalized.altitude,
+    timestamp: normalized.timestamp,
+    hdop: normalized.hdop,
+    lat: normalized.lat,
+    lng: normalized.lng,
+    accuracy: normalized.accuracy,
+    t: normalized.t,
+    alt: normalized.alt,
+    segment: segmentIndex
+  };
+}
+
 function receive(p){
   if(!session||session.state!=='running')return;
   lastSignal=Date.now();
-  displayPosition(p);
-  const result=MoveCore.accept(last,p);
+  const nextPoint = normalize(p);
+  displayPosition(nextPoint);
+  const result=MoveCore.accept(last,nextPoint);
   if(!result.ok){message(result.reason);return;}
   if(!session.runStart) session.runStart=Date.now();
   if(!lines.length) lines.push([]);
-  lines[lines.length-1].push([p.lat,p.lng]);
+  lines[lines.length-1].push([nextPoint.lat,nextPoint.lng]);
   session.meters = (session.meters||0) + (result.meters||0);
   session.kcal = MoveCore.calories(session.met, session.weight, seconds());
-  session.points.push({lat:p.lat,lng:p.lng,t:p.t,accuracy:p.accuracy,segment:lines.length-1});
-  last=p;
+  session.points.push(toSessionPoint(nextPoint, lines.length-1));
+  last=nextPoint;
   setTrack(lines.flat());
-  if(session.points.length===1&&map){map.setView([p.lat,p.lng],18);setStart(p);}
+  if(session.points.length===1&&map){map.setView([nextPoint.lat,nextPoint.lng],18);setStart(nextPoint);}
   $('badge').textContent = session.demo ? '● 示範中' : '● 記錄中';
   render();
 }
@@ -148,7 +184,7 @@ function run(){
   session.runStart=Date.now();
   last=null;
   lastSignal=Date.now();
-  if(session.demo){demoTick();demoTimer=setInterval(demoTick,1000);} else { watch=navigator.geolocation.watchPosition(pos=>receive(normalize(pos)), geoError, {enableHighAccuracy:true, timeout:15000, maximumAge:0}); holdScreen(); }
+  if(session.demo){demoTick();demoTimer=setInterval(demoTick,1000);} else { watch=navigator.geolocation.watchPosition(pos=>receive(normalize(pos)), geoError, {enableHighAccuracy:true, timeout:15000, maximumAge:0}); }
   render();
 }
 
@@ -188,7 +224,15 @@ $('demo').onclick=()=>begin(true);
 function demoTick(){
   const i=session.demoIndex++, angle=i*.12;
   session.seconds+=5;
-  receive({lat:center[0]+.00062*Math.sin(angle),lng:center[1]+.00085*Math.cos(angle),accuracy:6,t:session.id+i*6000});
+  const gps = {
+    latitude: center[0] + .00062 * Math.sin(angle),
+    longitude: center[1] + .00085 * Math.cos(angle),
+    accuracy: 6,
+    timestamp: session.id + i * 6000,
+    altitude: 0,
+    hdop: 6
+  };
+  receive(gps);
 }
 
 function pause(reason){
@@ -237,11 +281,12 @@ $('finish').onclick=()=>{
     points:[...(session.points||[])],
     target: target ? {lat:target.lat,lng:target.lng} : null
   };
-  records.unshift(record);
+  const enriched = window.TrackMetricsCalculator ? window.TrackMetricsCalculator.fromRecord(record) : record;
+  records.unshift(enriched);
   persist();
   renderHistory();
   render();
-  message('運動紀錄已完成，平均速度 ' + record.avgSpeed.toFixed(1) + ' km/h。');
+  message('運動紀錄已完成，平均速度 ' + (enriched.avgSpeedKmH || enriched.avgSpeed || 0).toFixed(1) + ' km/h。');
 };
 
 function download(name,body,type){
@@ -260,7 +305,8 @@ function cell(v){
 function exportRows(items){
   const rows=[['時間 ISO','課堂代號','類型','活動','身高 cm','體重 kg','年齡','時間 sec','距離 m','平均速度 km/h','總熱量 kcal','有效定位點','集合點']];
   for(const r of items){
-    const avg = Number(r.avgSpeed ?? (r.seconds>0 ? averageSpeedKmH(r.meters || 0, r.seconds) : 0));
+    const metrics = window.TrackMetricsCalculator ? window.TrackMetricsCalculator.fromRecord(r) : r;
+    const avg = Number(metrics.avgSpeedKmH ?? (r.seconds>0 ? averageSpeedKmH(r.meters || 0, r.seconds) : 0));
     const targetText = r.target ? `${r.target.lat.toFixed(5)}, ${r.target.lng.toFixed(5)}` : '';
     rows.push([
       r.date || new Date().toISOString(),
@@ -271,9 +317,9 @@ function exportRows(items){
       r.weight ?? '',
       r.age ?? '',
       Number(r.seconds || 0),
-      Number(r.meters || 0),
+      Number(metrics.meters || 0),
       avg.toFixed(1),
-      Number(r.kcal || 0),
+      Number(metrics.estKJ || r.kcal || 0),
       Array.isArray(r.points) ? r.points.length : 0,
       targetText
     ]);
@@ -299,13 +345,13 @@ function routeThumbnail(r){
   svg.setAttribute('aria-label','路線預覽');
   const ps=(r.points||[]);
   if(ps.length>1){
-    const xs=ps.map(p=>p.lng), ys=ps.map(p=>p.lat), minX=Math.min(...xs), maxX=Math.max(...xs), minY=Math.min(...ys), maxY=Math.max(...ys);
+    const xs=ps.map(p=>p.lng ?? p.longitude ?? 0), ys=ps.map(p=>p.lat ?? p.latitude ?? 0), minX=Math.min(...xs), maxX=Math.max(...xs), minY=Math.min(...ys), maxY=Math.max(...ys);
     const scale=Math.min(76/(Math.max(maxX-minX,0.0001)),43/(Math.max(maxY-minY,0.0001)));
     const group=new Map();
     for(const p of ps){
       const k=p.segment||0;
       if(!group.has(k))group.set(k,[]);
-      group.get(k).push(`${50 + (p.lng - minX) * scale * 2},${33.5 - (p.lat - minY) * scale * 2}`);
+      group.get(k).push(`${50 + (p.lng ?? p.longitude ?? 0 - minX) * scale * 2},${33.5 - (p.lat ?? p.latitude ?? 0 - minY) * scale * 2}`);
     }
     for(const points of group.values()){
       const poly=document.createElementNS(ns,'polyline');
@@ -338,7 +384,7 @@ function renderHistory(){
   $('historyTotal').textContent=actual.length?`${actual.length} 次運動 · ${actual.reduce((s,r)=>s+(Number(r.meters)||0),0)/1000} km`: '0 次運動';
   const shown = records.filter(r => historyFilter==='all' ? true : historyFilter==='demo' ? !!r.demo : !r.demo);
   if(!shown.length){
-    root.innerHTML='<div class="empty-state"><div class="empty-art"><svg><use href="#i-route"/></svg></div><div><h3>還沒有紀錄</h3><p>完成一次運動後，就可以在這裡查看與匯出。</p></div></div>';
+    root.innerHTML='<div class="empty-state"><div class="empty-art"><svg><use href="#i-route"/></svg></div><div><h3>還沒有紀錄</h3><p>完成一次運動後，就可以在這裡查看與匯出紀錄。</p></div></div>';
     return;
   }
   for(const r of shown){
@@ -350,7 +396,8 @@ function renderHistory(){
     const title=document.createElement('strong');
     title.textContent = r.alias || (r.demo ? '示範運動' : '運動紀錄');
     const meta=document.createElement('small');
-    meta.textContent = `${new Date(r.date||Date.now()).toLocaleString('zh-TW')} · ${(Number(r.meters)||0)/1000} km · ���均 ${(Number(r.avgSpeed ?? (r.seconds>0 ? averageSpeedKmH(r.meters||0, r.seconds) : 0)) || 0).toFixed(1)} km/h`;
+    const metrics = window.TrackMetricsCalculator ? window.TrackMetricsCalculator.fromRecord(r) : r;
+    meta.textContent = `${new Date(r.date||Date.now()).toLocaleString('zh-TW')} · ${(Number(metrics.meters)||0)/1000} km · 平均 ${(Number(metrics.avgSpeedKmH ?? (r.seconds>0 ? averageSpeedKmH(r.meters || 0, r.seconds) : 0)) || 0).toFixed(1)} km/h`;
     info.append(title, meta);
     row.append(info);
     root.append(row);
@@ -379,4 +426,5 @@ renderHistory();
 render();
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 
-document.querySelectorAll('.sidenav a[href^="#"]').forEach(a=>a.addEventListener('click',()=>{document.querySelectorAll('.sidenav a').forEach(n=>n.classList.toggle('active',n===a));document.querySelector('.sidenav').classList.remove('open');}));
+document.querySelectorAll('.sidenav a[href^="#"]').forEach(a=>a.addEventListener('click',()=>{document.querySelectorAll('.sidenav a').forEach(n=>n.classList.toggle('active',n===a));document.querySelectorAll('section[id]').forEach(sec=>sec.hidden = sec.id !== a.getAttribute('href').slice(1));}));
+

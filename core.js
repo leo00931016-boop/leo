@@ -51,17 +51,29 @@
   }
 
   function accept(previous,p){
-    if(!Number.isFinite(p.lat)||!Number.isFinite(p.lng)||!Number.isFinite(p.t)||!Number.isFinite(p.accuracy)||Math.abs(p.lat)>90||Math.abs(p.lng)>180||p.accuracy<0||p.accuracy>35){
+    if(
+      !Number.isFinite(p.lat) ||
+      !Number.isFinite(p.lng) ||
+      !Number.isFinite(p.t) ||
+      !Number.isFinite(p.accuracy) ||
+      Math.abs(p.lat)>90 ||
+      Math.abs(p.lng)>180 ||
+      p.accuracy<0 ||
+      p.accuracy>80
+    ){
       return {ok:false,reason:'GPS 定位不夠穩定，請在戶外空曠處再試一次。'};
     }
+
     if(!previous) return {ok:true,meters:0,break:false};
 
     const dt=(p.t-previous.t)/1000;
     if(dt<=0) return {ok:false,reason:'GPS 時間順序異常，請重新定位。'};
 
     const d=distance(previous,p);
-    if(d/dt>8) return {ok:false,reason:'GPS 跳動過大，請檢查定位品質。'};
-    if(d<4) return {ok:true,meters:0,break:false};
+
+    // 放寬門檻：慢步行、校園 GPS 抖動常見
+    if(d/dt>15) return {ok:false,reason:'GPS 跳動過大，請檢查定位品質。'};
+    if(d<1.5) return {ok:true,meters:0,break:false};
 
     return {ok:true,meters:d,break:false};
   }

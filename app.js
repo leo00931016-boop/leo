@@ -22,7 +22,7 @@ $('locate').onclick=()=>{if(session?.demo){message('示範模式使用模擬位�
 function normalize(pos){return {lat:pos.coords.latitude,lng:pos.coords.longitude,accuracy:pos.coords.accuracy,t:pos.timestamp};}
 function seconds(){return session?session.seconds+(session.state==='running'&&session.runStart?(Date.now()-session.runStart)/1000:0):0;}
 function fmt(n){const s=Math.floor(n);return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;}
-function render(){document.body.classList.toggle('is-active',!!session&&session.state!=='finished');$('activityLabel').textContent=session?.demo?'示範運動':session?.mode?.split(' · ')[0]||'舒適步行';const s=seconds(),d=session?.meters||0;$('elapsed').textContent=fmt(s);$('distance').textContent=(d/1000).toFixed(2);$('calories').textContent=session?Math.round(MoveCore.calories(session.met,session.weight,s)):0;$('speed').textContent=s>0?(d/s*3.6).toFixed(1):'0.0';$('points').textContent=`${session?.points.length||0} 個有效點`;$('fields').disabled=!!session&&session.state!=='finished';$('start').disabled=!!session&&session.state!=='finished';$('demo').disabled=$('start').disabled;$('pause').disabled=!session||session.state==='finished';$('finish').disabled=!session||session.state==='finished';$('pause').textContent=session?.state==='paused'?'▶ 繼續':'Ⅱ 暫停';}
+function render(){document.body.classList.toggle('is-active',!!session&&session.state!=='finished');$('activityLabel').textContent=session?.demo?'示範運動':session?.mode?.split(' · ')[0]||'舒適步行';const s=seconds(),d=session?.meters||0;$('elapsed').textContent=fmt(s);$('distance').textContent=(d/1000).toFixed(2);$('calories').textContent=session?Math.round(MoveCore.calories(session.met,session.weight,s)):0;$('speed').textContent=s>0?(d/s*3.6).toFixed(1):'0.0';$('points').textContent=`${session?.points.length||0} 個有效點`;$('fields').disabled=!!session&&session.state!=='finished';$('start').disabled=!!session&&session.state!=='finished';$('demo').disabled=$('start').disabled;$('pause').disabled=!session||session.state!=='finished';$('finish').disabled=!session||session.state!=='finished';$('pause').textContent=session?.state==='paused'?'▶ 繼續':'Ⅱ 暫停';}
 async function holdScreen(){try{if('wakeLock'in navigator)wake=await navigator.wakeLock.request('screen');}catch{}}
 function stopWatch(){if(watch!==null){navigator.geolocation.clearWatch(watch);watch=null;}clearInterval(demoTimer);demoTimer=null;wake?.release().catch(()=>{});wake=null;}
 function receive(p){if(!session||session.state!=='running')return;lastSignal=Date.now();displayPosition(p);const result=MoveCore.accept(last,p);if(!result.ok){message(result.reason);return;}if(!session.runStart)session.runStart=Date.now();if(result.break||!lines.length)lines.push([]);lines[lines.length-1].push([p.lat,p.lng]);session.meters+=result.meters;session.points.push({...p,segment:lines.length-1});last=p;setTrack(lines);if(session.points.length===1&&map){map.setView([p.lat,p.lng],17);setStart(p);}$('badge').textContent=session.demo?'● 示範資料':'● GPS 記錄中';message(session.demo?'示範模式：使用模擬座標與時間，紀錄不代表真實運動。':'記錄中。保持頁面在前景；停下來休息時請按暫停。');render();}
@@ -36,7 +36,80 @@ function persist(){try{localStorage.setItem(KEY,JSON.stringify(records));storage
 $('finish').onclick=()=>{if(!session||session.state==='finished')return;session.seconds=seconds();session.runStart=0;session.state='finished';stopWatch();session.kcal=MoveCore.calories(session.met,session.weight,session.seconds);records.unshift({...session,points:[...session.points],target:target?{lat:target.lat,lng:target.lng}:null});persist();renderHistory();render();$('badge').textContent='● 運動已結束';if(storageOK)message(`已儲存${session.demo?'示範':''}紀錄：${(session.meters/1000).toFixed(2)} km，${fmt(session.seconds)}。可匯出摘要或 GPS 軌跡。`);};
 function download(name,body,type){const url=URL.createObjectURL(new Blob([body],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function cell(v){let s=String(v??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';}
-function exportCSV(items){if(!items.length){message('目前沒有可匯出的紀錄。');return;}const rows=[['時間 ISO','課堂代號','類型','活動','身高 cm','體重 kg','年齡','時間 sec','距離 m','總熱量 kcal','有效 GPS 點','平均速度','段數','平均速度','起點到終點直線距離'],...items.map(r=>[r.date,r.alias,r.demo?'示範':'GPS',r.mode,r.height,r.weight,r.age,Math.round(r.seconds),r.meters.toFixed(1),r.kcal.toFixed(1),r.points.length])];download('campus-move.csv','\ufeff'+rows.map(r=>r.map(cell).join(',')).join('\r\n'),'text/csv;charset=utf-8');}
+
+// 球面直線距離計算函式 (Haversine Formula)
+function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+// 修正後的 CSV 匯出邏輯：自動計算平均速度、段數與直線距離
+function exportCSV(items){
+  if(!items.length){message('目前沒有可匯出的紀錄。');return;}
+  const headers = [
+    '時間 ISO', '課堂代號', '類型', '活動', '身高 cm', '體重 kg', '年齡',
+    '時間 sec', '距離 m', '總熱量 kcal', '有效 GPS 點',
+    '平均速度 km/h', '段數', '平均配速', '起點到終點直線距離 km'
+  ];
+
+  const rows = items.map(r => {
+    const sec = Math.round(r.seconds || 0);
+    const meters = r.meters || 0;
+    
+    // 1. 計算平均速度 (km/h)
+    const avgSpeed = sec > 0 ? ((meters / sec) * 3.6).toFixed(2) : '0.00';
+
+    // 2. 計算總段數 (以有效記錄的 segment 數量或以每 1 公里切分)
+    let segments = 1;
+    if (r.points && r.points.length > 0) {
+      const segIndices = r.points.map(p => p.segment || 0);
+      segments = Math.max(...segIndices) + 1;
+    } else {
+      segments = Math.max(1, Math.floor(meters / 1000) + 1);
+    }
+
+    // 3. 計算跑者配速格式 (分'秒"/km)
+    let pace = "--'--\"/km";
+    if (meters > 0 && sec > 0) {
+      const paceSec = sec / (meters / 1000);
+      const pm = Math.floor(paceSec / 60);
+      const ps = Math.round(paceSec % 60);
+      pace = `${pm}'${String(ps).padStart(2, '0')}"/km`;
+    }
+
+    // 4. 計算起點到終點直線距離 (km)
+    let straightDist = '0.00';
+    if (r.points && r.points.length >= 2) {
+      const pStart = r.points[0];
+      const pEnd = r.points[r.points.length - 1];
+      straightDist = getDistanceFromLatLonInKm(pStart.lat, pStart.lng, pEnd.lat, pEnd.lng).toFixed(2);
+    }
+
+    return [
+      r.date,
+      r.alias || '',
+      r.demo ? '示範' : 'GPS',
+      r.mode || '',
+      r.height || '',
+      r.weight || '',
+      r.age || '',
+      sec,
+      meters.toFixed(1),
+      (r.kcal || 0).toFixed(1),
+      r.points ? r.points.length : 0,
+      avgSpeed,
+      segments,
+      pace,
+      straightDist
+    ];
+  });
+
+  download('campus-move.csv', '\ufeff' + [headers, ...rows].map(r => r.map(cell).join(',')).join('\r\n'), 'text/csv;charset=utf-8');
+}
+
 let historyFilter='all';
 function routeThumbnail(r){const box=document.createElement('div');box.className='route-thumb';const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 100 67');svg.setAttribute('aria-label','此筆運動軌跡縮圖');const ps=r.points||[];if(ps.length>1){const xs=ps.map(p=>p.lng),ys=ps.map(p=>p.lat),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);const scale=Math.min(76/Math.max(maxX-minX,.00001),43/Math.max(maxY-minY,.00001));const groups=new Map();for(const p of ps){const k=p.segment||0;if(!groups.has(k))groups.set(k,[]);groups.get(k).push(`${50+(p.lng-(minX+maxX)/2)*scale},${33.5-(p.lat-(minY+maxY)/2)*scale}`);}for(const points of groups.values()){const poly=document.createElementNS(ns,'polyline');poly.setAttribute('points',points.join(' '));poly.setAttribute('fill','none');svg.append(poly);}}else{const t=document.createElementNS(ns,'text');t.setAttribute('x','50');t.setAttribute('y','38');t.setAttribute('text-anchor','middle');t.setAttribute('stroke','none');t.setAttribute('fill','#9aa987');t.setAttribute('font-size','9');t.textContent='尚無軌跡';svg.append(t);}box.append(svg);return box;}
 function renderHistory(){const root=$('records');root.replaceChildren();const actual=records.filter(r=>!r.demo);$('historyTotal').textContent=actual.length?`${actual.length} 次運動 · ${(actual.reduce((s,r)=>s+r.meters,0)/1000).toFixed(2)} km`:'尚無 GPS 運動紀錄';const shown=records.filter(r=>historyFilter==='all'||(historyFilter==='demo'?r.demo:!r.demo));if(!shown.length){root.innerHTML='<div class="empty"><div class="empty-art"><svg><use href="#i-route"/></svg></div><div><h3>從第一段路，開始累積。</h3><p>完成運動後，你的距離、時間與軌跡會留在這裡。</p></div></div>';return;}shown.forEach(r=>{const row=document.createElement('div');row.className='record';row.append(routeThumbnail(r));const info=document.createElement('div'),title=document.createElement('strong'),sub=document.createElement('small');title.textContent=`${r.demo?'示範 · ':''}${r.alias||r.mode.split(' · ')[0]}`;sub.textContent=new Date(r.date).toLocaleString('zh-TW',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});info.append(title,sub);row.append(info);const stats=document.createElement('div');stats.className='record-stats';for(const [value,label]of [[(r.meters/1000).toFixed(2),'公里'],[fmt(r.seconds),'運動時間']]){const item=document.createElement('span');item.textContent=value;const unit=document.createElement('small');unit.textContent=label;item.append(unit);stats.append(item);}row.append(stats);const actions=document.createElement('div');actions.className='record-actions';for(const [label,handler]of [...(!r.demo?[['繳交',()=>window.PaceSubmit?.(r)]]:[]),['摘要',()=>exportCSV([r])],['軌跡',()=>download('campus-track.json',JSON.stringify(r,null,2),'application/json')],['刪除',()=>{if(confirm('刪除此筆運動紀錄？')){records=records.filter(x=>x.id!==r.id);persist();renderHistory();}}]]){const button=document.createElement('button');button.textContent=label;button.onclick=handler;if(label==='繳交')button.dataset.cloudOnly='';actions.append(button);}row.append(actions);root.append(row);});}
@@ -50,105 +123,3 @@ setInterval(()=>{if(session?.state==='running'&&!session.demo&&Date.now()-lastSi
 renderHistory();render();if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 
 document.querySelectorAll('.sidenav a[href^="#"]').forEach(a=>a.addEventListener('click',()=>{document.querySelectorAll('.sidenav a').forEach(n=>n.classList.toggle('active',n===a));document.querySelector('.breadcrumb strong').textContent=a.textContent.trim();}));
-/**
- * 計算兩點經緯度之球面距離 (公里)
- */
-function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
-  const R = 6371; // 地球半徑 (km)
-  const dLat = (lat2 - lat1) * (Math.PI / 180);
-  const dLon = (lon2 - lon1) * (Math.PI / 180);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-/**
- * 計算平均速度 (km/h)
- * @param {number} distanceKm - 距離 (公里)
- * @param {number} durationHours - 時間 (小時)
- * @returns {string} 保留兩位小數的速度字串
- */
-function calculateAvgSpeed(distanceKm, durationHours) {
-  if (!durationHours || durationHours <= 0 || !distanceKm || distanceKm <= 0) {
-    return "0.00";
-  }
-  return (distanceKm / durationHours).toFixed(2);
-}
-
-/**
- * 將速度 (km/h) 換算為跑者配速格式 (分'秒"/km)
- */
-function speedToPace(speedKmh) {
-  const speed = parseFloat(speedKmh);
-  if (!speed || speed <= 0) return "--'--\"/km";
-  const paceMinutes = 60 / speed;
-  const m = Math.floor(paceMinutes);
-  const s = Math.round((paceMinutes - m) * 60);
-  return `${m}'${s.toString().padStart(2, '0')}"/km`;
-}
-function exportTrackWithAvgSpeed() {
-  const points = state.trackedRoute.length > 0 ? state.trackedRoute : state.drawnPoints.map((p, idx) => ({
-    lat: p[0],
-    lon: p[1],
-    timestamp: new Date(Date.now() + idx * 60000).toISOString()
-  }));
-
-  if (points.length < 2) {
-    alert("至少需要 2 個點位才能計算平均速度！");
-    return;
-  }
-
-  const startPt = points[0];
-  const endPt = points[points.length - 1];
-
-  // 全程總時間 (小時)
-  const totalHours = (new Date(endPt.timestamp) - new Date(startPt.timestamp)) / (1000 * 60 * 60);
-
-  // 計算全程總距離
-  let totalDistanceKm = 0;
-  for (let i = 1; i < points.length; i++) {
-    totalDistanceKm += getDistanceFromLatLonInKm(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
-  }
-
-  // 全程平均速度
-  const overallAvgSpeed = calculateAvgSpeed(totalDistanceKm, totalHours);
-  const overallPace = speedToPace(overallAvgSpeed);
-
-  const headers = [
-    "序號",
-    "時間 (Timestamp)",
-    "緯度 (Latitude)",
-    "經度 (Longitude)",
-    "累計距離 (km)",
-    "此時累計平均速度 (km/h)",
-    "全程總平均速度 (km/h)",
-    "全程總配速"
-  ];
-
-  let accumulatedDist = 0;
-  const rows = points.map((p, idx) => {
-    if (idx > 0) {
-      accumulatedDist += getDistanceFromLatLonInKm(points[idx - 1].lat, points[idx - 1].lon, p.lat, p.lon);
-    }
-    const currentHours = (new Date(p.timestamp) - new Date(startPt.timestamp)) / (1000 * 60 * 60);
-    const rollingAvgSpeed = calculateAvgSpeed(accumulatedDist, currentHours);
-
-    return [
-      idx + 1,
-      `"${p.timestamp}"`,
-      p.lat,
-      p.lon,
-      accumulatedDist.toFixed(2),
-      rollingAvgSpeed,
-      overallAvgSpeed,
-      `"${overallPace}"`
-    ].join(",");
-  });
-
-  // 加 \uFEFF 防止 Excel 開啟中文亂碼
-  const csvContent = "\uFEFF" + [headers.join(","), ...rows].join("\r\n");
-  downloadFile(csvContent, "運動軌跡_平均速度分析.csv", "text/csv;charset=utf-8;");
-}
